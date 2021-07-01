@@ -17,6 +17,9 @@ const NotificationsModel = require('../components/notifications/notifications.mo
 const RecordingsModel = require('../components/recordings/recordings.model');
 const SettingsModel = require('../components/settings/settings.model');
 
+const FormData = require('form-data');
+const { Readable } = require('stream')
+
 const movementHandler = {};
 
 class MotionHandler {
@@ -83,7 +86,7 @@ class MotionHandler {
 
         if (!atHome || (atHome && exclude.includes(cameraName))) {
           if (!movementHandler[cameraName]) {
-            logger.debug(`New ${trigger} alert`, cameraName, true);
+            logger.info(`New ${trigger} alert`, cameraName, true);
             movementHandler[cameraName] = true;
 
             const motionInfo = await this.getMotionInfo(cameraName, trigger, recordingSettings);
@@ -99,12 +102,13 @@ class MotionHandler {
                 );
 
                 if (
-                  awsSettings.active &&
-                  awsSettings.contingent_total > 0 &&
-                  awsSettings.contingent_left > 0 &&
+                  //   // awsSettings.active &&
+                  //   // awsSettings.contingent_total > 0 &&
+                  //   // awsSettings.contingent_left > 0 &&
                   Camera.settings.rekognition.active
                 ) {
-                  motionInfo.label = await this.handleImageDetection(
+                  logger.info(`Starting object detection`, cameraName, true);
+                  motionInfo.label = await this.handleLocalImageDetection(
                     cameraName,
                     awsSettings,
                     Camera.settings.rekognition.labels,
@@ -150,7 +154,7 @@ class MotionHandler {
                 } else {
                   const message = `Skip handling movement. Configured label (${Camera.settings.rekognition.labels}) not detected.`;
 
-                  logger.debug(message, cameraName, true);
+                  logger.info(message, cameraName, true);
 
                   errorState = true;
                   errorMessage = message;
@@ -223,6 +227,52 @@ class MotionHandler {
     };
   }
 
+  async handleLocalImageDetection(cameraName, aws, labels, confidence, imgBuffer) {
+    let detected = [];
+
+    labels = (labels || ['human', 'face', 'person', 'cat', 'dog']).map((label) => label.toLowerCase());
+    confidence = confidence || 80;
+
+    logger.info(`Analyzing image for following labels: ${labels.toString()}`, cameraName, true);
+
+    const form = new FormData();
+    form.append('image', Readable.from(imgBuffer), {
+      filename: 'image.jpg',
+      contentType: 'image/jpeg',
+      knownLength: imgBuffer.length
+    });
+
+    try {
+      const result = await got.post("http://localhost:5000/v1/vision/detection", { body: form });
+      let response = JSON.parse(result.body)["predictions"];
+      logger.info(`response.body:${result.body}`);
+      detected = response.filter(
+        (entry) => entry.label && labels.includes(entry.label.toLowerCase()) && label.confidence * 100 >= confidence
+      ).map((entry) => entry.label);
+
+      logger.info(
+        `Label with confidence >= ${confidence}% ${detected.length > 0 ? `found: ${detected.toString()}` : 'not found!'
+        }`,
+        cameraName,
+        true
+      );
+
+      if (detected.length === 0) {
+        response = response.map((entry) => {
+          return `${entry.label.toLowerCase()} (${Number.parseFloat(entry.confidence) * 100}%)`;
+        });
+        logger.info(`Found labels are: ${response}`, cameraName, true); //for debugging
+      }
+
+    } catch (error) {
+      logger.error('An error occured during image rekognition', cameraName, true);
+      logger.error(error);
+    }
+
+    return detected.length > 0 ? detected[0] : false;
+  }
+
+
   async handleImageDetection(cameraName, aws, labels, confidence, imgBuffer) {
     let detected = [];
 
@@ -256,8 +306,7 @@ class MotionHandler {
         ).map((awsLabel) => awsLabel.Name);
 
         logger.debug(
-          `Label with confidence >= ${confidence}% ${
-            detected.length > 0 ? `found: ${detected.toString()}` : 'not found!'
+          `Label with confidence >= ${confidence}% ${detected.length > 0 ? `found: ${detected.toString()}` : 'not found!'
           }`,
           cameraName,
           true
